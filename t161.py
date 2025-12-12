@@ -128,7 +128,7 @@ TRADING_BOT_USERNAME = os.getenv("TRADING_BOT_USERNAME", "")
 SUPPORT_QUEUE_KEY = os.getenv("SUPPORT_QUEUE_KEY", "support:queue")
 NOTIFY_QUEUE_KEY = os.getenv("NOTIFY_QUEUE_KEY", "trading:notify:ru") 
 BOT_OWNER_INDEX_KEY = os.getenv("BOT_OWNER_INDEX_KEY", "bot:owner_index")
-AMOUNTS = [500, 1000, 2000, 5000, 10000]
+AMOUNTS = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
 LEVERAGES = [1, 2, 3]  
 NOTIFY_WORKER_LAST_ACTIVE = 0
 NEXT_COUNTDOWN_AT: dict[tuple[int, int], float] = {}  
@@ -1411,7 +1411,7 @@ async def amount_choice_kb(prefix: str = "dep_card_amt", user_id: int = None) ->
         if user_id:
             min_deposit = await store.get_user_min_deposit(user_id)
             logger.info(f"📊 Минимальный депозит для пользователя {user_id}: ${min_deposit}")
-        base_amounts = [500, 1000, 2000, 5000, 10000]
+        base_amounts = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
         if min_deposit > 0:
             filtered_amounts = [amt for amt in base_amounts if amt >= min_deposit]
             if not filtered_amounts:
@@ -1477,7 +1477,7 @@ async def get_user_min_deposit(uid: int) -> int:
     raw_global = await r.get("config:min_deposit_global")
     return int(raw_global.decode()) if raw_global else 0
 def generate_deposit_buttons(min_amount: int) -> InlineKeyboardMarkup:
-    base = [500, 1000, 2000, 5000, 10000]
+    base = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
     if min_amount > 0:
         amounts = [x for x in base if x >= min_amount]
     else:
@@ -1503,7 +1503,7 @@ async def generate_crypto_deposit_buttons(user_id: int = None) -> InlineKeyboard
                 min_deposit = await store.get_user_min_deposit(user_id)
             else:
                 min_deposit = 0
-            base_amounts = [500, 1000, 2000, 5000, 10000]
+            base_amounts = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
             if min_deposit > 0:
                 filtered = [amt for amt in base_amounts if amt >= min_deposit]
                 if not filtered:
