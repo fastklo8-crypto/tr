@@ -61,31 +61,19 @@ structlog.configure(
     cache_logger_on_first_use=True,
 )
 logging.getLogger().handlers = logging.getLogger().handlers[:1]
-def _resolve_trade_bot_token():
-    import argparse, os
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--token")
-    args, _ = parser.parse_known_args()
-    if args.token:
-        return args.token
-    env_token = os.getenv("TRADE_BOT_TOKEN")
-    if env_token:
-        return env_token
-    raise SystemExit("❌ TRADE_BOT_TOKEN is required")
-logger = structlog.get_logger("autotrading-bot") if 'structlog' in globals() else logging.getLogger("autotrading-bot")
-BOT_TOKEN_RU = os.getenv("BOT_TOKEN_RU", "8385870509:AAHdzf0X2wDITzh2hBMmY7g4CHBJ-ab8jzU")
-TRADE_BOT_TOKEN = _resolve_trade_bot_token()
+TRADE_BOT_TOKEN = os.getenv("TRADE_BOT_TOKEN","8385870509:AAHdzf0X2wDITzh2hBMmY7g4CHBJ-ab8jzU")
 if not TRADE_BOT_TOKEN:
-    TRADE_BOT_TOKEN = BOT_TOKEN_RU
+    raise RuntimeError("TRADE_BOT_TOKEN is not set")
 bot = Bot(
     token=TRADE_BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
+logger = structlog.get_logger("autotrading-bot") if 'structlog' in globals() else logging.getLogger("autotrading-bot")
 router = Router()
 channel_router = Router()
 REDIS_URL = "redis://default:UwRBirrNGabYOycgxafXyqWNu78KJH26@redis-14197.c340.ap-northeast-2-1.ec2.cloud.redislabs.com:14197"
-MIN_SEND_INTERVAL_CHAT = float(os.getenv("MIN_SEND_INTERVAL_CHAT", "1.0"))
-MIN_COUNTDOWN_EDIT_INTERVAL = float(os.getenv("MIN_COUNTDOWN_EDIT_INTERVAL", "1.0"))  
+MIN_SEND_INTERVAL_CHAT = float(os.getenv("MIN_SEND_INTERVAL_CHAT", "0.1"))
+MIN_COUNTDOWN_EDIT_INTERVAL = float(os.getenv("MIN_COUNTDOWN_EDIT_INTERVAL", "0.5"))  
 PAYMENT_CONFIRMATION_CHAT_ID = int(os.getenv("paysmi", "-1002691532093"))
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -276,7 +264,10 @@ async def safe_send_text(chat_id: int, text: str, user_id: int = None, **kwargs)
             token = await store.get_user_bot_token(owner)
         else:
             token = TRADE_BOT_TOKEN
-        trb = Bot(token=token)
+        trb = Bot(
+            token=token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        )
         msg = await trb.send_message(chat_id=chat_id, text=text, **kwargs)
         NEXT_SEND_AT_CHAT[chat_id] = time.time() + MIN_SEND_INTERVAL_CHAT
         return msg
