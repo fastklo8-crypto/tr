@@ -272,7 +272,7 @@ async def safe_send_text(chat_id: int, text: str, user_id: int = None, **kwargs)
         NEXT_SEND_AT_CHAT[chat_id] = time.time() + MIN_SEND_INTERVAL_CHAT
         return msg
     except TelegramRetryAfter as e:
-        delay = float(getattr(e, "retry_after", 1.0))
+        delay = float(getattr(e, "retry_after", 0.1))
         if delay > 8:
             async def delayed():
                 try:
