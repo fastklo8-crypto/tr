@@ -1,0 +1,25 @@
+2025-12-12 21:05:52,360 [INFO] Start polling
+2025-12-12 21:05:57,559 [INFO] Run polling for bot @GPT5CRYPTO_bot id=8385870509 - 'Telegram Trade'
+2025-12-12 21:06:14,955 [INFO] Update id=330832768 is handled. Duration 14094 ms by bot id=8385870509
+2025-12-12 21:06:34,770 [INFO] Update id=330832769 is handled. Duration 33828 ms by bot id=8385870509
+2025-12-12 21:06:34,772 [INFO] Update id=330832770 is handled. Duration 33828 ms by bot id=8385870509
+2025-12-12 21:06:34,774 [INFO] Update id=330832772 is handled. Duration 33842 ms by bot id=8385870509
+2025-12-12 21:06:34,775 [INFO] Update id=330832771 is handled. Duration 33842 ms by bot id=8385870509
+2025-12-12 21:06:37,088 [ERROR] Failed to fetch updates - TelegramNetworkError: HTTP Client says - ClientOSError: [WinError 121] Превышен таймаут семафора
+2025-12-12 21:06:37,089 [WARNING] Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 8385870509)
+2025-12-12 21:07:02,104 [INFO] Update id=330832776 is handled. Duration 61171 ms by bot id=8385870509
+2025-12-12 21:07:02,306 [INFO] Update id=330832775 is handled. Duration 61375 ms by bot id=8385870509
+2025-12-12 21:07:02,307 [INFO] Update id=330832773 is handled. Duration 61375 ms by bot id=8385870509
+2025-12-12 21:07:02,908 [INFO] Update id=330832774 is handled. Duration 61967 ms by bot id=8385870509
+2025-12-12 21:07:03,391 [INFO] Update id=330832777 is handled. Duration 62453 ms by bot id=8385870509
+2025-12-12 21:07:28,644 [INFO] Update id=330832778 is handled. Duration 87703 ms by bot id=8385870509
+2025-12-12 21:07:40,198 [INFO] Update id=330832779 is handled. Duration 99265 ms by bot id=8385870509
+2025-12-12 21:07:42,184 [ERROR] Failed to fetch updates - TelegramNetworkError: HTTP Client says - ServerDisconnectedError: Server disconnected
+2025-12-12 21:07:42,184 [WARNING] Sleep for 1.267736 seconds and try again... (tryings = 1, bot id = 8385870509)
+2025-12-12 21:07:54,297 [INFO] Update id=330832781 is handled. Duration 113359 ms by bot id=8385870509
+2025-12-12 21:07:57,617 [INFO] Update id=330832794 is handled. Duration 116671 ms by bot id=8385870509
+2025-12-12 21:07:58,776 [INFO] Update id=330832789 is handled. Duration 117827 ms by bot id=8385870509
+2025-12-12 21:08:11,555 [INFO] Update id=330832790 is handled. Duration 130609 ms by bot id=8385870509
+2025-12-12 21:08:19,856 [INFO] Update id=330832788 is handled. Duration 138905 ms by bot id=8385870509
+2025-12-12 21:08:34,521 [INFO] Connection established (tryings = 2, bot id = 8385870509)
+2025-12-12 21:09:16,646 [INFO] Update id=330832797 is handled. Duration 195688 ms by bot id=8385870509

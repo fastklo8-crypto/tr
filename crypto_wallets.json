@@ -1,0 +1,13 @@
+{
+  "USDT": {
+    "TRC20": "THoW5ZNbKZtTvn2HX4MZkP5M1kBVBKN7yJ",
+    "BEP20": "0xbdC2D6c25077A18A52C2B62a1721bd83b70dE70C",
+    "ERC20": "0xEC9e0824dd421497C8fdea6056b6520fCCA2AC8F"
+  },
+  "BTC": {
+    "BTC": "bc1qe3ha542ylwj48gl85lmav4jtpzczfx5n6w7wxw"
+  },
+  "ETH": {
+    "ERC20": "0xEC9e0824dd421497C8fdea6056b6520fCCA2AC8F"
+  }
+}
