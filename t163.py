@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
-from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.types import Update
@@ -49,32 +49,22 @@ import hashlib as _hl
 import sys, codecs, io
 import argparse
 from aiogram.fsm.state import StatesGroup, State
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='ignore')
-logging.basicConfig(
-    level=logging.INFO,
-    filename="tradebot.log",
-    filemode="a",
-    encoding="utf-8",
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-structlog.configure(
-    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-    cache_logger_on_first_use=True,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
+from aiogram import F, Router
+from aiogram.client.default import DefaultBotProperties
 logging.getLogger().handlers = logging.getLogger().handlers[:1]
 logger = structlog.get_logger("autotrading-bot") if 'structlog' in globals() else logging.getLogger("autotrading-bot")
 BOT_TOKEN_RU = None
-logger = structlog.get_logger("autotrading-bot") if 'structlog' in globals() else logging.getLogger("autotrading-bot")
-BOT_TOKEN_RU = None
 TRADE_BOT_TOKEN = os.getenv("TRADE_BOT_TOKEN", "8385870509:AAHdzf0X2wDITzh2hBMmY7g4CHBJ-ab8jzU")
-bot = None
-
+try:
+    bot = Bot(token=TRADE_BOT_TOKEN)
+    logger.info("✅ Bot instance created")
+except Exception as e:
+    logger.error(f"❌ Failed to create bot instance: {e}")
+    bot = None
 router = Router()
 channel_router = Router()
 REDIS_URL = "redis://default:UwRBirrNGabYOycgxafXyqWNu78KJH26@redis-14197.c340.ap-northeast-2-1.ec2.cloud.redislabs.com:14197"
-MIN_SEND_INTERVAL_CHAT = float(os.getenv("MIN_SEND_INTERVAL_CHAT", "1.0"))
-MIN_COUNTDOWN_EDIT_INTERVAL = float(os.getenv("MIN_COUNTDOWN_EDIT_INTERVAL", "1.0"))  
 PAYMENT_CONFIRMATION_CHAT_ID = int(os.getenv("paysmi", "-1002691532093"))
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -134,6 +124,40 @@ LEVERAGES = [1, 2, 3]
 NOTIFY_WORKER_LAST_ACTIVE = 0
 NEXT_COUNTDOWN_AT: dict[tuple[int, int], float] = {}  
 NEXT_SEND_AT_CHAT: dict[int, float] = {}
+WELCOME_IMAGE_URL = "https://i.ibb.co/7JWyRRdp/94af51c3330e.jpg"
+ASSETS_IMAGE_URL = WELCOME_IMAGE_URL
+async def safe_send_text(
+    chat_id: int,
+    text: str,
+    user_id: Optional[int] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: Optional[str] = ParseMode.HTML
+) -> Optional[Message]:
+    try:
+        if user_id is None:
+            user_id = chat_id
+        owner = await store.get_bot_owner(user_id)
+        token = await store.get_user_bot_token(owner)
+        trb = Bot(token=token)
+        return await trb.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    except TelegramForbiddenError:
+        logger.info(f"Bot blocked by user {user_id}")
+        await send_bot_blocked_event(user_id, "safe_send_text")
+        await store.remove_watcher(user_id)
+        return None
+    except TelegramRetryAfter as e:
+        delay = float(getattr(e, "retry_after", 1.0))
+        logger.warning(f"Flood control for user {user_id}: {delay}s")
+        await asyncio.sleep(delay)
+        return await safe_send_text(chat_id, text, user_id, reply_markup, parse_mode)
+    except Exception as e:
+        logger.error(f"Error sending message to {user_id}: {e}")
+        return None
 async def get_filtered_amounts(user_id: int) -> list[int]:
     min_dep = await get_user_min_deposit(user_id)
     return [x for x in AMOUNTS if x >= min_dep]
@@ -211,7 +235,7 @@ async def errors_handler(event: Exception, *args, **kwargs):
             if any(phrase in error_msg for phrase in blocked_phrases):
                 try:
                     await _init_trading_bot_username_once()
-                    owner = await store.get_bot_owner(cb.from_user.id)
+                    owner = await store.get_bot_owner(user_id) 
                     support_event = {
                         "type": "bot_blocked",
                         "event_id": f"bot_blocked_{user_id}_{int(time.time() * 1000)}",
@@ -230,11 +254,11 @@ async def errors_handler(event: Exception, *args, **kwargs):
                     await store.remove_watcher(user_id)
                 except Exception as e:
                     logger.error(f"Failed to send bot_blocked event: {e}")
+        
         logger.exception(f"Unhandled exception in bot: {event}")
     except Exception as e:
         logger.error(f"Error in errors_handler: {e}")
     return True
-
 async def check_active_users_blocked_status():
     while True:
         try:
@@ -253,59 +277,6 @@ async def check_active_users_blocked_status():
         await asyncio.sleep(1800)
 async def start_background_tasks():
     asyncio.create_task(check_active_users_blocked_status(), name="blocked_status_checker")
-async def safe_send_text(chat_id: int, text: str, user_id: int = None, **kwargs):
-    now = time.time()
-    wait = max(0.0, NEXT_SEND_AT_CHAT.get(chat_id, 0.0) - now)
-    if wait > 0:
-        await asyncio.sleep(min(wait, 1.0))
-    try:
-        target_user_id = user_id if user_id is not None else chat_id
-        owner = await store.get_bot_owner(target_user_id)
-        if owner:
-            token = await store.get_user_bot_token(owner)
-        else:
-            token = TRADE_BOT_TOKEN
-        trb = Bot(token=token)
-        msg = await trb.send_message(chat_id=chat_id, text=text, **kwargs)
-        NEXT_SEND_AT_CHAT[chat_id] = time.time() + MIN_SEND_INTERVAL_CHAT
-        return msg
-    except TelegramRetryAfter as e:
-        delay = float(getattr(e, "retry_after", 1.0))
-        if delay > 8:
-            async def delayed():
-                try:
-                    await asyncio.sleep(delay + 0.1)
-                    target_user_id = user_id if user_id is not None else chat_id
-                    owner = await store.get_bot_owner(target_user_id)
-                    if owner:
-                        token = await store.get_user_bot_token(owner)
-                    else:
-                        token = TRADE_BOT_TOKEN
-                    trb = Bot(token=token)
-                    await trb.send_message(chat_id=chat_id, text=text, **kwargs)
-                except Exception as e:
-                    logger.exception(f"Delayed send failed: {e}")
-            asyncio.create_task(delayed())
-            NEXT_SEND_AT_CHAT[chat_id] = time.time() + delay
-            return None
-        await asyncio.sleep(delay + 0.05)
-        try:
-            target_user_id = user_id if user_id is not None else chat_id
-            owner = await store.get_bot_owner(target_user_id)
-            if owner:
-                token = await store.get_user_bot_token(owner)
-            else:
-                token = TRADE_BOT_TOKEN
-            trb = Bot(token=token)
-            msg = await trb.send_message(chat_id=chat_id, text=text, **kwargs)
-            NEXT_SEND_AT_CHAT[chat_id] = time.time() + MIN_SEND_INTERVAL_CHAT
-            return msg
-        except Exception as e:
-            logger.exception("Send after retry failed")
-            return None
-    except Exception as e:
-        logger.exception(f"send_message failed for chat {chat_id}: {e}")
-        return None
 def get_available_networks(token: str) -> list[str]:
     data = _load_crypto_wallets()
     token_u = (token or "USDT").upper()
@@ -862,17 +833,36 @@ class Store:
         except Exception:
             pass
     async def get_all_users(self) -> List[User]:
-        users = []
+        users: List[User] = []
         try:
-            keys = await self.r.keys("user:*")
-            for key in keys:
-                if b":" in key and not any(x in key for x in [b":positions", b":history", b":last10", b":assets_msg"]):
-                    raw = await self.r.get(key)
-                    if raw:
-                        data = json.loads(raw)
-                        users.append(User(**data))
-        except Exception:
-            pass
+            keys = []
+            async for key in self.r.scan_iter(match="user:*", count=1000):
+                key_str = key.decode() if isinstance(key, bytes) else str(key)
+                if (
+                    ":positions" in key_str
+                    or ":history" in key_str
+                    or ":last10" in key_str
+                    or ":assets_msg" in key_str
+                    or ":ref_" in key_str
+                    or ":wd_" in key_str
+                ):
+                    continue
+                keys.append(key)
+            if not keys:
+                return users
+            raws = await self.r.mget(keys)
+            for raw in raws:
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(
+                        raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+                    )
+                    users.append(User(**data))
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"get_all_users failed: {e}")
         return users
     async def get_user_full_info(self, uid: int) -> Dict[str, Any]:
         user = await self.get_user(uid)
@@ -1261,7 +1251,7 @@ ENGLISH_TEXTS = {
 }
 async def get_user_language(uid: int) -> str:
     user = await store.get_user(uid)
-    return user.language_code or "ru"
+    return user.language_code or "en"  
 async def is_english_user(uid: int) -> bool:
     user = await store.get_user(uid)
     return user.language_code == "en"
@@ -1274,6 +1264,17 @@ async def get_localized_text(uid: int, key: str, **kwargs) -> str:
         except Exception:
             pass
     return text
+def get_deposit_methods_kb(is_english: bool = False) -> InlineKeyboardMarkup:
+    if is_english:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Cryptocurrency", callback_data="dep_crypto")],  
+            [InlineKeyboardButton(text="🔙 Back", callback_data="open_assets")]
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Криптовалюта", callback_data="dep_crypto")],  
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="open_assets")]
+        ])
 async def get_localized_kb(uid: int, kb_type: str, **kwargs) -> InlineKeyboardMarkup:
     is_english = await is_english_user(uid)
     if kb_type == "assets":
@@ -1998,34 +1999,47 @@ async def check_bot_blocked_status(user_id: int) -> bool:
         if any(phrase in error_msg for phrase in blocked_phrases):
             return True 
         return False
-async def send_bot_blocked_event(user_id: int, error_msg: str):
+async def send_bot_blocked_event(user_id: int, reason: str):
     try:
-        await _init_trading_bot_username_once()
-        bot_owner_id = await store.get_bot_owner(user_id)
-        if not bot_owner_id:
-            bot_owner_id = "main"
-        owner = await store.get_bot_owner(cb.from_user.id)
+        owner = await store.get_bot_owner(user_id)
         support_event = {
-            "type": "bot_blocked",  
+            "type": "bot_blocked",
             "event_id": f"bot_blocked_{user_id}_{int(time.time() * 1000)}",
             "user_id": user_id,
             "timestamp": time.time(),
             "bot_username": TRADING_BOT_USERNAME,
+            "reason": reason,
+            "bot": "ru",
+            "detected_by": "periodic_check",
             "bot_owner_id": owner or user_id,
-            "reason": error_msg,
-            "detected_by": "signal_broadcast"
         }
         await store.push_support_event(support_event)
-        logger.info(f"🚫 Bot blocked event: user {user_id}, owner {bot_owner_id}, reason: {error_msg}")
+        logger.info(
+            f"🚫 Bot blocked event sent: user {user_id}, reason: {reason}"
+        )
     except Exception as e:
         logger.error(f"Failed to send bot_blocked event: {e}")
 async def _init_trading_bot_username_once():
+    """Initialize bot username if not already set"""
     global TRADING_BOT_USERNAME
     if not TRADING_BOT_USERNAME:
         try:
-            TRADING_BOT_USERNAME = (await bot.get_me()).username  
-        except Exception:
-            pass
+            if not bot:
+                logger.error("❌ Bot instance is not initialized")
+                return
+            me = await bot.get_me()
+            TRADING_BOT_USERNAME = me.username
+            logger.info(f"✅ Bot username initialized: @{TRADING_BOT_USERNAME}")
+            await r.setex("bot:username", 86400, TRADING_BOT_USERNAME)
+        except Exception as e:
+            logger.error(f"❌ Failed to get bot username: {e}")
+            try:
+                cached_username = await r.get("bot:username")
+                if cached_username:
+                    TRADING_BOT_USERNAME = cached_username.decode() if isinstance(cached_username, bytes) else cached_username
+                    logger.info(f"📦 Using cached bot username: @{TRADING_BOT_USERNAME}")
+            except Exception:
+                pass
 r: redis.Redis = redis.from_url(REDIS_URL, decode_responses=False)
 store = Store(r)
 class S(StatesGroup):
@@ -2521,7 +2535,7 @@ async def wd_card_cancel(cb: CallbackQuery, state: FSMContext):
     await state.set_state(S.IDLE)
     await cb.message.edit_text("❌ Вывод на банковскую карту отменен")
     await cb.answer()
-@router.callback_query(F.data == "wd_method_crypto", S.WD_CHOOSE_METHOD)
+@router.callback_query(F.data == "wd_method_crypto")
 async def wd_method_crypto(cb: CallbackQuery, state: FSMContext):
     try:
         try:
@@ -2539,26 +2553,28 @@ async def wd_method_crypto(cb: CallbackQuery, state: FSMContext):
                 "bot": "ru" if await get_user_language(cb.from_user.id) == "ru" else "en"
             }
             await store.push_support_event(support_event)
-            logger.info(f"✅ Withdraw crypto selected event sent to support queue: {support_event}")
+            logger.info(f"вЬЕ Withdraw crypto selected event sent to support queue: {support_event}")
         except Exception as e:
-            logger.error(f"❌ Failed to send withdraw_crypto_selected event to support queue: {e}")
+            logger.error(f"вЭМ Failed to send withdraw_crypto_selected event to support queue: {e}")
         await state.set_state(S.WD_CHOOSE_TOKEN)
         title_text = await get_localized_text(cb.from_user.id, "withdraw_crypto_title")
         choose_token_text = await get_localized_text(cb.from_user.id, "withdraw_choose_token")
         text = f"{title_text}\n\n{choose_token_text}"
         kb = await get_localized_kb(cb.from_user.id, "withdraw_token")
         try:
-            await cb.message.edit_text(text, reply_markup=kb)
-        except TelegramRetryAfter as e:
-            delay = float(getattr(e, "retry_after", 1.0))
-            logger.warning(f"Flood control for user {cb.from_user.id}: {delay}s")
-            await cb.answer(f"Please wait {int(delay)} seconds...", show_alert=True)
-            return
-        except Exception as e:
-            logger.error(f"Error editing message for user {cb.from_user.id}: {e}")
-            await cb.answer("Error occurred", show_alert=True)
-            return
+            await cb.message.delete()
+        except Exception as delete_error:
+            logger.warning(f"Could not delete previous message: {delete_error}")
+        await cb.message.answer(text, reply_markup=kb)
         await cb.answer()
+    except TelegramForbiddenError:
+        logger.info(f"User {cb.from_user.id} blocked bot during crypto withdrawal")
+        await send_bot_blocked_event(cb.from_user.id, "withdraw_crypto_failed")
+        await store.remove_watcher(cb.from_user.id)
+    except TelegramRetryAfter as e:
+        delay = float(getattr(e, "retry_after", 1.0))
+        logger.warning(f"Flood control for user {cb.from_user.id}: {delay}s")
+        await cb.answer(f"Please wait {int(delay)} seconds...", show_alert=True)
     except Exception as e:
         logger.exception(f"Unexpected error in wd_method_crypto: {e}")
         await cb.answer("An unexpected error occurred", show_alert=True)
@@ -2935,74 +2951,107 @@ def clear_cache(ticker: str = None):
         _exchange_rate_cache = EXCHANGE_RATE_CACHE_DEFAULT.copy()
         logger.info("✅ Весь кэш курсов очищен")
 async def _close_leftover_open_positions():
+    start_time = time.time()
+    closed = 0
+    processed_keys = 0
     try:
-        closed = 0
-        async for key in store.r.scan_iter(match="position:*"):
-            raw = await store.r.get(key)
+        batch_size = 100  
+        position_keys = []
+        async for key in store.r.scan_iter(match="position:*", count=batch_size):
+            position_keys.append(key)
+            processed_keys += 1
+        logger.info(f"Найдено ключей позиций: {len(position_keys)}, обработано итераций: {processed_keys}")
+        if not position_keys:
+            logger.info("Нет позиций для обработки")
+            return
+        pipe = store.r.pipeline()
+        for key in position_keys:
+            pipe.get(key)
+        raw_positions = await pipe.execute()
+        tasks = []
+        for i, raw in enumerate(raw_positions):
             if not raw:
                 continue
             try:
                 data = json.loads(raw)
                 p = Position(**data)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Ошибка парсинга позиции из ключа {position_keys[i]}: {e}")
                 continue
             if p.status != PosStatus.OPEN:
                 continue
-            price_now = p.price_now or p.entry_price
-            if p.side == Side.LONG:
-                pnl_pct = (price_now - p.entry_price) / p.entry_price * p.leverage * 100.0
-            else:
-                pnl_pct = (p.entry_price - price_now) / p.entry_price * p.leverage * 100.0
-            pnl_abs = p.order_amount * pnl_pct / 100.0
-            try:
-                user = await store.get_user(p.user_id)
-                before_balance = user.balance
-                user.balance += pnl_abs
-                await store.save_user(user)
-                try:
-                    await support_emit({
-                        "type": "balance_update",
-                        "user_id": p.user_id,
-                        "username": None,
-                        "before": before_balance,
-                        "after": user.balance,
-                        "reason": "trade_pnl"
-                    })
-                except Exception:
-                    pass
-            except Exception:
-                logger.exception("Failed to update user balance on cleanup")
-            try:
-                h = TradeHistory(
-                    position_id=p.id,
-                    symbol=p.symbol,
-                    side=p.side,
-                    entry=p.entry_price,
-                    exit=price_now,
-                    pnl_abs=round(pnl_abs, 2),
-                    pnl_pct=round(pnl_pct, 2),
-                    closed_by="TIME",
-                    closed_at=time.time(),
-                )
-                await store.add_history(p.user_id, h)
-                await store.push_outcome(p.user_id, "W" if pnl_abs >= 0 else "L")
-            except Exception:
-                logger.exception("Failed to write history on cleanup")
-            try:
-                await store.remove_position(p.user_id, p.id)
-            except Exception:
-                logger.exception("Failed to remove position on cleanup")
-            try:
-                await safe_send_text(
-                    p.user_id,
-                    f"⛔️ Позиция закрыта: {p.symbol} {p.side.value} | PnL: ${pnl_abs:.2f} ({pnl_pct:.2f}%)"
-                )
-            except Exception:
-                logger.exception("Failed to notify user on cleanup")
-            closed += 1
-        logger.info("Leftover cleanup: closed %d open positions", closed)
-    except Exception:
-        logger.exception("Cleanup on startup failed")
+            task = _process_single_position(p)
+            tasks.append(task)
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            closed = sum(1 for r in results if isinstance(r, bool) and r)
+        elapsed = time.time() - start_time
+        logger.info(f"Очистка завершена: закрыто {closed} позиций за {elapsed:.2f} сек")
+    except Exception as e:
+        logger.error(f"Ошибка при очистке позиций: {e}")
+        logger.exception("Детали ошибки:")
+async def _process_single_position(p: Position) -> bool:
+    try:
+        price_now = p.price_now or p.entry_price
+        if p.side == Side.LONG:
+            pnl_pct = (price_now - p.entry_price) / p.entry_price * p.leverage * 100.0
+        else:
+            pnl_pct = (p.entry_price - price_now) / p.entry_price * p.leverage * 100.0
+        pnl_abs = p.order_amount * pnl_pct / 100.0
+        user = await store.get_user(p.user_id)
+        if user:
+            before_balance = user.balance
+            user.balance += pnl_abs
+            await store.save_user(user)
+            asyncio.create_task(
+                _send_balance_update_event(p.user_id, before_balance, user.balance, "trade_pnl"),
+                name=f"balance_update_{p.user_id}"
+            )
+        h = TradeHistory(
+            position_id=p.id,
+            symbol=p.symbol,
+            side=p.side,
+            entry=p.entry_price,
+            exit=price_now,
+            pnl_abs=round(pnl_abs, 2),
+            pnl_pct=round(pnl_pct, 2),
+            closed_by="TIME",
+            closed_at=time.time(),
+        )
+        await asyncio.gather(
+            store.add_history(p.user_id, h),
+            store.push_outcome(p.user_id, "W" if pnl_abs >= 0 else "L"),
+            store.remove_position(p.user_id, p.id),
+            return_exceptions=True  
+        )
+        asyncio.create_task(
+            _notify_user_position_closed(p.user_id, p.symbol, p.side.value, pnl_abs, pnl_pct),
+            name=f"notify_{p.user_id}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка обработки позиции {p.id}: {e}")
+        return False
+async def _send_balance_update_event(user_id: int, before: float, after: float, reason: str):
+    try:
+        await support_emit({
+            "type": "balance_update",
+            "user_id": user_id,
+            "username": None,
+            "before": before,
+            "after": after,
+            "reason": reason
+        })
+    except Exception as e:
+        logger.warning(f"Не удалось отправить событие баланса для пользователя {user_id}: {e}")
+async def _notify_user_position_closed(user_id: int, symbol: str, side: str, pnl_abs: float, pnl_pct: float):
+    try:
+        await safe_send_text(
+            user_id,
+            f"⛔️ Позиция закрыта: {symbol} {side} | PnL: ${pnl_abs:.2f} ({pnl_pct:.2f}%)"
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
 @router.message(CommandStart())
 async def on_start(m: Message, state: FSMContext):
     await ensure_bot_initialized()
@@ -3037,6 +3086,9 @@ async def on_start(m: Message, state: FSMContext):
         pass
     existed = await r.get(RKeys.user(m.from_user.id))
     u = await store.get_user(m.from_user.id)
+    if not existed:
+        u.language_code = "en"
+        await store.save_user(u)
     try:
         await _init_trading_bot_username_once()
         owner = await store.get_bot_owner(m.from_user.id)
@@ -3058,18 +3110,19 @@ async def on_start(m: Message, state: FSMContext):
             "ref_code": ref_code,
             "bot_username": TRADING_BOT_USERNAME,
             "timestamp": time.time(),
-            "language_code": m.from_user.language_code or "unknown",
-            "bot": "ru",
+            "language_code": u.language_code or "unknown",
+            "bot": "en" if u.language_code == "en" else "ru",  # Используем язык пользователя
         }
         await store.push_support_event(start_event)
         logger.info(
             f"✅ {event_type} event sent to support: "
-            f"user_id={m.from_user.id}, is_new={not existed}"
+            f"user_id={m.from_user.id}, is_new={not existed}, language={u.language_code}"
         )
     except Exception as e:
         logger.error(f"❌ Failed to send start event to support: {e}")
-    if existed and u.language_code:
-        if u.language_code == "en":
+    user_language = u.language_code or "en" 
+    if existed and user_language:
+        if user_language == "en":
             balance_text = (
                 f"Your balance: ${u.balance:.2f}\n"
                 f"Leverage: x{u.leverage}, order amount ${u.order_amount:.2f}.\n\n"
@@ -3081,36 +3134,28 @@ async def on_start(m: Message, state: FSMContext):
                 f"Плечо: x{u.leverage}, сумма ордера ${u.order_amount:.2f}.\n\n"
                 f"Выберите действие ниже ⤵️"
             )
-        menu_kb = get_main_menu_kb(u.language_code)
+        menu_kb = get_main_menu_kb(user_language)
         await m.answer(balance_text, reply_markup=menu_kb)
         await state.set_state(S.IDLE)
         return
-    if not existed:
-        try:
-            await support_emit(
-                {
-                    "type": "user_registered",
-                    "user_id": m.from_user.id,
-                    "username": m.from_user.username,
-                    "language": m.from_user.language_code,
-                }
-            )
-        except Exception:
-            pass
-    await state.set_state(S.CHOOSING_LANGUAGE)
-    welcome_text = await get_localized_text(m.from_user.id, "welcome")
-    language_kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🇷🇺 Русский"), KeyboardButton(text="🇺🇸 English")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
+    if user_language == "en":
+        balance_text = (
+            f"Your balance: ${u.balance:.2f}\n"
+            f"Leverage: x{u.leverage}, order amount ${u.order_amount:.2f}.\n\n"
+            f"Choose action below ⤵️"
+        )
+    else:
+        balance_text = (
+            f"Ваш баланс: ${u.balance:.2f}\n"
+            f"Плечо: x{u.leverage}, сумма ордера ${u.order_amount:.2f}.\n\n"
+            f"Выберите действие ниже ⤵️"
+        )
+    menu_kb = get_main_menu_kb(user_language)
     try:
         await m.answer_photo(
             photo="https://i.ibb.co/7JWyRRdp/94af51c3330e.jpg",
-            caption=welcome_text,
-            reply_markup=language_kb,
+            caption=balance_text,
+            reply_markup=menu_kb,
         )
     except TelegramForbiddenError:
         logger.info(f"User {m.from_user.id} blocked bot during photo send")
@@ -3119,12 +3164,25 @@ async def on_start(m: Message, state: FSMContext):
         return
     except Exception:
         try:
-            await m.answer(welcome_text, reply_markup=language_kb)
+            await m.answer(balance_text, reply_markup=menu_kb)
         except TelegramForbiddenError:
             logger.info(f"User {m.from_user.id} blocked bot during text send")
             await send_bot_blocked_event(m.from_user.id, "text_send_failed")
             await store.remove_watcher(m.from_user.id)
             return
+    await state.set_state(S.IDLE)
+    if not existed:
+        try:
+            await support_emit(
+                {
+                    "type": "user_registered",
+                    "user_id": m.from_user.id,
+                    "username": m.from_user.username,
+                    "language": user_language,
+                }
+            )
+        except Exception:
+            pass
 @router.message(F.text == "🇷🇺 Русский", S.CHOOSING_LANGUAGE)
 async def on_russian_selected(m: Message, state: FSMContext):
     u = await store.get_user(m.from_user.id)
@@ -3487,7 +3545,6 @@ async def countdown_and_cleanup(
                         text=txt,
                         reply_markup=open_market_kb(is_english),
                     )
-                NEXT_COUNTDOWN_AT[key] = time.time() + MIN_COUNTDOWN_EDIT_INTERVAL
                 await asyncio.sleep(1)
                 left -= 1
             except TelegramRetryAfter as e:
@@ -3882,13 +3939,24 @@ async def on_assets(m: Message):
     balance_text = await get_localized_text(m.from_user.id, "assets_balance")
     positions_text = await get_localized_text(m.from_user.id, "open_positions_count")
     pnl_text = await get_localized_text(m.from_user.id, "unrealized_pnl")
-    text = (
+    caption = (
         f"{balance_text}: ${user.balance + unreal:.2f} \n"
         f"{positions_text}: {len(positions)}\n"
-        f"{pnl_text}: {fmt_money(unreal)}\n"
+        f"{pnl_text}: {fmt_money(unreal)}"
     )
     assets_kb = await get_assets_keyboard(m.from_user.id)
-    msg = await m.answer(text, reply_markup=assets_kb)
+    try:
+        msg = await m.answer_photo(
+            photo=ASSETS_IMAGE_URL,
+            caption=caption,
+            reply_markup=assets_kb
+        )
+    except Exception as photo_error:
+        logger.warning(f"Could not send photo: {photo_error}. Falling back to text.")
+        msg = await m.answer(
+            text=f"рЯТ∞ <b>Активы</b>\n\n{caption}",
+            reply_markup=assets_kb
+        )
     await store.set_assets_msg(m.from_user.id, msg.message_id)
     spawn(live_update_assets(m.chat.id, m.from_user.id, msg.message_id, duration_sec=60), name="live_update_assets")
 @router.callback_query(F.data == "open_assets")
@@ -3925,8 +3993,6 @@ async def get_assets_keyboard(uid: int) -> InlineKeyboardMarkup:
             inline_keyboard=[
                 [InlineKeyboardButton(text="Deposit", callback_data="deposit"),
                  InlineKeyboardButton(text="Withdraw", callback_data="withdraw")],
-                [InlineKeyboardButton(text="Verification", callback_data="kyc"),
-                 InlineKeyboardButton(text="Requisites", callback_data="reqs")],
             ]
         )
     else:
@@ -3934,8 +4000,6 @@ async def get_assets_keyboard(uid: int) -> InlineKeyboardMarkup:
             inline_keyboard=[
                 [InlineKeyboardButton(text="Пополнить", callback_data="deposit"),
                  InlineKeyboardButton(text="Вывести", callback_data="withdraw")],
-                [InlineKeyboardButton(text="Верификация", callback_data="kyc"),
-                 InlineKeyboardButton(text="Реквизиты", callback_data="reqs")],
             ]
         )
 def get_deposit_methods_kb(is_english: bool = False) -> InlineKeyboardMarkup:
@@ -3945,18 +4009,18 @@ def get_deposit_methods_kb(is_english: bool = False) -> InlineKeyboardMarkup:
         ])
     else:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Банковская карта", callback_data="dep_card")],
             [InlineKeyboardButton(text="Криптовалюта", callback_data="dep_crypto")],
         ])
 def get_withdraw_methods_kb(is_english: bool = False) -> InlineKeyboardMarkup:
     if is_english:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Cryptocurrency", callback_data="wd_method_crypto")],
+            [InlineKeyboardButton(text="🔙 Back", callback_data="open_assets")]
         ])
     else:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Криптовалюта", callback_data="wd_method_crypto")],
-            [InlineKeyboardButton(text="Банковская карта", callback_data="wd_method_card")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="open_assets")]
         ])
 async def live_update_open_positions(chat_id: int, uid: int, msg_id: int, duration_sec: int = 60):
     until = time.time() + duration_sec
@@ -4024,6 +4088,7 @@ async def on_deposit(cb: CallbackQuery):
         await store.clear_assets_msg(cb.from_user.id)
     except Exception:
         pass
+    
     try:
         await _init_trading_bot_username_once()
         owner = await store.get_bot_owner(cb.from_user.id) 
@@ -4043,7 +4108,11 @@ async def on_deposit(cb: CallbackQuery):
         logger.error(f"Failed to send deposit_opened event to support queue: {e}")
     text = await get_localized_text(cb.from_user.id, "deposit_choose_method")
     kb = await get_localized_kb(cb.from_user.id, "deposit_methods")
-    await cb.message.edit_text(text, reply_markup=kb)
+    try:
+        await cb.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete message: {e}")
+    await cb.message.answer(text, reply_markup=kb)
     await cb.answer()
 async def set_card_temp(event_id: str, data: dict) -> None:
     try:
@@ -4450,6 +4519,43 @@ async def get_user(self, uid: int) -> User:
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки пользователя {uid}: {e}")
         return User(user_id=uid)
+async def check_redis_performance():
+    try:
+        logger.info("🔍 Проверка производительности Redis...")
+        start = time.time()
+        await r.ping()
+        ping_time = (time.time() - start) * 1000
+        logger.info(f"✅ Redis ping: {ping_time:.1f}ms")
+        start = time.time()
+        for i in range(10):
+            await r.set(f"test:{i}", str(i))
+        write_time = ((time.time() - start) * 1000) / 10
+        logger.info(f"✅ Redis set avg: {write_time:.1f}ms")
+        start = time.time()
+        for i in range(10):
+            await r.get(f"test:{i}")
+        read_time = ((time.time() - start) * 1000) / 10
+        logger.info(f"✅ Redis get avg: {read_time:.1f}ms")
+        start = time.time()
+        pipe = r.pipeline()
+        for i in range(10):
+            pipe.get(f"test:{i}")
+        await pipe.execute()
+        pipe_time = ((time.time() - start) * 1000) / 10
+        logger.info(f"✅ Redis pipeline avg: {pipe_time:.1f}ms")
+        for i in range(10):
+            await r.delete(f"test:{i}")
+        try:
+            import socket
+            host = REDIS_URL.split('@')[1].split(':')[0]
+            ip = socket.gethostbyname(host)
+            logger.info(f"📍 Redis host: {host} → {ip}")
+        except:
+            pass
+        return ping_time, write_time, read_time, pipe_time
+    except Exception as e:
+        logger.error(f"❌ Redis performance check failed: {e}")
+        return None
 async def check_redis_connection():
     try:
         await r.ping()
@@ -4615,9 +4721,17 @@ async def debug_balance(m: Message):
         f"🆔 Last activity: {user.last_activity}"
     )
 async def startup():
-    if not await check_redis_connection():
-        logger.error("Cannot start without Redis connection")
-        return
+    logger.info("🚀 Запуск бота...")
+    results = await check_redis_performance()
+    if results:
+        ping_time, _, _, _ = results
+        if ping_time > 200:
+            logger.warning(f"⚠️ ВЫСОКАЯ ЗАДЕРЖКА REDIS: {ping_time:.0f}ms! Это может замедлить работу бота.")
+        else:
+            logger.info(f"✅ Redis подключен, ping: {ping_time:.0f}ms")
+    await start_background_tasks()
+    await _close_leftover_open_positions()
+    logger.info("✅ Бот запущен")
 async def save_user(self, user: User) -> None:
     try:
         await self.r.set(RKeys.user(user.user_id), user.model_dump_json())
@@ -6092,40 +6206,51 @@ async def stop_watch(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "withdraw")
 async def on_withdraw(cb: CallbackQuery, state: FSMContext):
     try:
-        await store.clear_assets_msg(cb.from_user.id)
-    except Exception:
-        pass
-    try:
-        await _init_trading_bot_username_once()
-        owner = await store.get_bot_owner(cb.from_user.id)
-        support_event = {
-            "type": "withdraw_opened",
-            "event_id": f"withdraw_{cb.from_user.id}_{int(time.time() * 1000)}",
-            "user_id": cb.from_user.id,
-            "username": cb.from_user.username or str(cb.from_user.id),
-            "first_name": cb.from_user.first_name or "",
-            "last_name": cb.from_user.last_name or "",
-            "bot_username": TRADING_BOT_USERNAME,
-            "timestamp": time.time(),
-            "bot": "ru" if await get_user_language(cb.from_user.id) == "ru" else "en"
-        }
-        await store.push_support_event(support_event)
-        logger.info(f"✅ Withdraw opened event sent to support queue: {support_event}")
+        try:
+            await _init_trading_bot_username_once()
+            owner = await store.get_bot_owner(cb.from_user.id)
+            support_event = {
+                "type": "withdraw_opened",
+                "event_id": f"withdraw_{cb.from_user.id}_{int(time.time() * 1000)}",
+                "user_id": cb.from_user.id,
+                "username": cb.from_user.username,
+                "first_name": cb.from_user.first_name,
+                "last_name": cb.from_user.last_name,
+                "bot_username": TRADING_BOT_USERNAME,
+                "timestamp": time.time(),
+            }
+            await store.push_support_event(support_event)
+            logger.info(f"withdraw_opened event sent to support queue: {support_event}")
+        except Exception as e:
+            logger.error(f"Failed to send withdraw_opened event to support queue: {e}")
+        try:
+            await store.clear_assets_msg(cb.from_user.id)
+        except Exception:
+            pass
+        withdraw_title = await get_localized_text(cb.from_user.id, "withdraw_title")
+        user = await store.get_user(cb.from_user.id)
+        available_text = await get_localized_text(cb.from_user.id, "withdraw_available", balance=user.balance)
+        choose_method_text = await get_localized_text(cb.from_user.id, "withdraw_choose_method")
+        text = f"{withdraw_title}\n\n{available_text}\n\n{choose_method_text}"
+        kb = await get_localized_kb(cb.from_user.id, "withdraw_methods")
+        try:
+            if cb.message.photo:
+                await cb.message.edit_caption(
+                    caption=text,
+                    reply_markup=kb
+                )
+            else:
+                await cb.message.edit_text(
+                    text=text,
+                    reply_markup=kb
+                )
+        except Exception as e:
+            logger.warning(f"Could not edit message: {e}")
+            await cb.message.answer(text, reply_markup=kb)
+        await cb.answer()
     except Exception as e:
-        logger.error(f"❌ Failed to send withdraw_opened event to support queue: {e}")
-    user = await store.get_user(cb.from_user.id)
-    if user.balance <= 0:
-        error_text = await get_localized_text(cb.from_user.id, "insufficient_funds")
-        await cb.answer(error_text, show_alert=True)
-        return
-    await state.set_state(S.WD_CHOOSE_METHOD)
-    title_text = await get_localized_text(cb.from_user.id, "withdraw_title")
-    available_text = await get_localized_text(cb.from_user.id, "withdraw_available", balance=user.balance)
-    choose_text = await get_localized_text(cb.from_user.id, "withdraw_choose_method")
-    text = f"{title_text}\n\n{available_text}\n\n{choose_text}"
-    kb = await get_localized_kb(cb.from_user.id, "withdraw_methods")
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
+        logger.exception(f"Unexpected error in on_withdraw: {e}")
+        await cb.answer("Произошла ошибка", show_alert=True)
 @router.callback_query(F.data == "wd_method_card", S.WD_CHOOSE_METHOD)
 async def wd_method_card(cb: CallbackQuery, state: FSMContext):
     try:
@@ -7133,43 +7258,93 @@ async def on_shutdown():
     logger.info("🛑 Bot shutting down...")
 async def main():
     global bot
-    TRADE_BOT_TOKEN = os.getenv("TRADE_BOT_TOKEN", "8385870509:AAHdzf0X2wDITzh2hBMmY7g4CHBJ-ab8jzU")
-    
+    TRADE_BOT_TOKEN = os.getenv("TRADE_BOT_TOKEN")
+    if not TRADE_BOT_TOKEN and len(sys.argv) > 2 and sys.argv[1] == "--token":
+        TRADE_BOT_TOKEN = sys.argv[2]
     if not TRADE_BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN_RU environment variable is not set!")
+        TRADE_BOT_TOKEN = "8385870509:AAHdzf0X2wDITzh2hBMmY7g4CHBJ-ab8jzU"
+        logger.warning("⚠️ Using fallback bot token. Consider setting TRADE_BOT_TOKEN environment variable.")
+    try:
+        bot = Bot(
+            token=TRADE_BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        )
+        me = await bot.get_me()
+        logger.info(f"🤖 Bot initialized: @{me.username} (ID: {me.id})")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize bot: {e}")
         return
-    
-    bot = Bot(token=TRADE_BOT_TOKEN)
-    
-    # Initialize bot username
-    await _init_trading_bot_username_once()
-    
-    # Start background tasks
-    await start_background_tasks()
-    
-    # Cleanup leftover positions
-    await _close_leftover_open_positions()
-    
-    # Setup dispatcher
+    try:
+        await _init_trading_bot_username_once()
+        logger.info(f"✅ Bot username: @{TRADING_BOT_USERNAME}")
+    except Exception as e:
+        logger.error(f"⚠️ Failed to get bot username: {e}")
+    try:
+        await start_background_tasks()
+        logger.info("✅ Background tasks started")
+    except Exception as e:
+        logger.error(f"⚠️ Error starting background tasks: {e}")
+    try:
+        await _close_leftover_open_positions()
+        logger.info("✅ Cleanup of leftover positions completed")
+    except Exception as e:
+        logger.error(f"⚠️ Error during cleanup: {e}")
     dp = Dispatcher()
     dp.include_router(router)
     dp.include_router(channel_router)
-    
-    # Set exception handler
     dp.errors.register(errors_handler)
-    
-    # Start polling
-    logger.info(f"🤖 Bot {TRADING_BOT_USERNAME} is starting...")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
-import sys
-
+    allowed_updates = [
+        "message",
+        "callback_query",
+        "channel_post",
+        "chat_member",
+        "my_chat_member"
+    ]
+    logger.info(f"🚀 Bot @{TRADING_BOT_USERNAME} is starting polling...")
+    restart_count = 0
+    max_restarts = 10
+    while restart_count < max_restarts:
+        try:
+            await dp.start_polling(
+                bot, 
+                allowed_updates=allowed_updates,
+                polling_timeout=30,
+                close_bot_session=False
+            )
+        except KeyboardInterrupt:
+            logger.info("👋 Bot stopped by user")
+            break
+        except asyncio.CancelledError:
+            logger.info("🛑 Bot task cancelled")
+            break
+        except Exception as e:
+            restart_count += 1
+            logger.error(f"💥 Bot crashed (restart {restart_count}/{max_restarts}): {e}")
+            if restart_count >= max_restarts:
+                logger.error("🔥 Maximum restarts reached. Exiting...")
+                break
+            wait_time = min(2 ** restart_count, 60)  
+            logger.info(f"⏳ Restarting in {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+            continue
+    logger.info("🔄 Cleaning up resources...")
+    try:
+        await bot.session.close()
+    except Exception as e:
+        logger.error(f"⚠️ Error closing bot session: {e}")
+    logger.info("✅ Bot shutdown completed")
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--token" and len(sys.argv) > 2:
-        TRADE_BOT_TOKEN = sys.argv[2]
-    
-    asyncio.run(main())
-
+    signal.signal(signal.SIGINT, lambda s, f: None)
+    signal.signal(signal.SIGTERM, lambda s, f: None)
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"🔥 Fatal error in main: {e}")
+        sys.exit(1)
 async def _send_user_action_event_to_support(*, bot_username: str, owner_user_id: int | None,
                                              user_id: int, user_username: str | None,
                                              action: str, callback_data: str | None,
