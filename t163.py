@@ -3620,10 +3620,17 @@ async def on_open_market(cb: CallbackQuery, state: FSMContext):
             pass
         insufficient_text = await get_localized_text(cb.from_user.id, "insufficient_funds")
         deposit_text = await get_localized_text(cb.from_user.id, "deposit")
-        text_insufficient = (
-            f"❗️ {insufficient_text}\n"
-            f"Требуемая маржа: ${required_margin:.2f}. Текущий баланс: ${user.balance:.2f}."
-        )
+        user_language = await get_user_language(cb.from_user.id)
+        if user_language == "en":
+            text_insufficient = (
+                f"❗️ {insufficient_text}\n"
+                f"Required margin: ${required_margin:.2f}. Current balance: ${user.balance:.2f}."
+            )
+        else:
+            text_insufficient = (
+                f"❗️ {insufficient_text}\n"
+                f"Требуемая маржа: ${required_margin:.2f}. Текущий баланс: ${user.balance:.2f}."
+            )
         kb_insufficient = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text=deposit_text, callback_data="deposit")]]
         )
@@ -3667,12 +3674,21 @@ async def on_open_market(cb: CallbackQuery, state: FSMContext):
     )
     await store.add_position(position)
     order_opened_text = await get_localized_text(cb.from_user.id, "order_opened")
-    opened_text = (
-        f"✅ {order_opened_text}: {position.symbol} {position.side.value}\n"
-        f"Сумма: ${position.order_amount:.2f} | Плечо: x{position.leverage}\n"
-        f"Вход: {position.entry_price} | TP: {position.tp} | SL: {position.sl}\n"
-        f"PNL: $0.00 (0.00%) — обновляется…"
-    )
+    user_language = await get_user_language(cb.from_user.id)
+    if user_language == "en":
+        opened_text = (
+            f"✅ {order_opened_text}: {position.symbol} {position.side.value}\n"
+            f"Amount: ${position.order_amount:.2f} | Leverage: x{position.leverage}\n"
+            f"Entry: {position.entry_price} | TP: {position.tp} | SL: {position.sl}\n"
+            f"PNL: $0.00 (0.00%) — updating…"
+        )
+    else:
+        opened_text = (
+            f"✅ {order_opened_text}: {position.symbol} {position.side.value}\n"
+            f"Сумма: ${position.order_amount:.2f} | Плечо: x{position.leverage}\n"
+            f"Вход: {position.entry_price} | TP: {position.tp} | SL: {position.sl}\n"
+            f"PNL: $0.00 (0.00%) — обновляется…"
+        )
     if loading:
         try:
             await loading.delete()
@@ -3685,7 +3701,8 @@ async def on_open_market(cb: CallbackQuery, state: FSMContext):
     )
     if msg is None:
         logger.error(f"Failed to send position opened message to user {cb.from_user.id}")
-        await cb.answer("❌ Ошибка при открытии позиции. Попробуйте еще раз.", show_alert=True)
+        error_text = "❌ Error opening position. Please try again." if user_language == "en" else "❌ Ошибка при открытии позиции. Попробуйте еще раз."
+        await cb.answer(error_text, show_alert=True)
         await store.remove_position(cb.from_user.id, position.id)
         await state.set_state(S.IDLE)
         return
