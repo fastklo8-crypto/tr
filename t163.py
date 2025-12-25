@@ -5843,6 +5843,262 @@ async def on_reqs(cb: CallbackQuery):
             lines.append(f"• {net}: <code>{addr}</code>")
     await cb.message.edit_text("\n".join(lines))
     await cb.answer()
+@router.message(Command("send_image"))
+async def send_image_command(m: Message):
+    admin_ids = [7229194724]  # Замените на реальные ID админов
+    if m.from_user.id not in admin_ids:
+        await m.answer("❌ У вас нет прав для этой команды")
+        return
+    parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await m.answer("❌ Используйте: /send_image <user_id> <текст>")
+        return
+    try:
+        user_id = int(parts[1])
+        caption = parts[2]
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.memory import MemoryStorage
+        storage = MemoryStorage()
+        await storage.set_data(
+            chat=m.chat.id,
+            user=m.from_user.id,
+            data={"admin_send_image": {"user_id": user_id, "caption": caption}}
+        )
+        await m.answer(
+            f"📤 Готово!\n"
+            f"👤 Получатель: {user_id}\n"
+            f"📝 Текст: {caption}\n\n"
+            f"Теперь отправьте картинку (фото или изображение)"
+        )
+    except ValueError:
+        await m.answer("❌ Неверный формат user_id")
+@router.message(Command("send_to_user"))
+async def send_to_user_command(m: Message):
+    admin_ids = [7229194724]  # Замените на реальные ID админов
+    if m.from_user.id not in admin_ids:
+        return
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await m.answer("❌ Используйте: /send_to_user <user_id>")
+        return
+    try:
+        user_id = int(parts[1])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📷 Картинка + текст", callback_data=f"admin_send_image:{user_id}")],
+            [InlineKeyboardButton(text="📝 Только текст", callback_data=f"admin_send_text:{user_id}")]
+        ])
+        await m.answer(
+            f"👤 Выбран пользователь: {user_id}\n"
+            f"Выберите тип отправки:",
+            reply_markup=kb
+        )
+    except ValueError:
+        await m.answer("❌ Неверный формат user_id")
+@router.callback_query(F.data.startswith("admin_send_image:"))
+async def admin_choose_send_image(cb: CallbackQuery, state: FSMContext):
+    admin_ids = [7229194724]  
+    if cb.from_user.id not in admin_ids:
+        await cb.answer("❌ Нет прав")
+        return
+    user_id = int(cb.data.split(":")[1])
+    await state.update_data(
+        admin_send_image_user_id=user_id,
+        admin_send_image_step="wait_image"
+    )
+    await cb.message.edit_text(
+        f"📤 Отправка картинки пользователю {user_id}\n\n"
+        f"1. Отправьте картинку (фото)\n"
+        f"2. После получения картинки я запрошу текст"
+    )
+    await cb.answer()
+@router.message(F.photo, lambda m: m.from_user.id in [7229194724])  # Только для админов
+async def admin_send_image_photo(m: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("admin_send_image_step") != "wait_image":
+        return
+    photo = m.photo[-1]
+    file_id = photo.file_id
+    await state.update_data(
+        admin_send_image_file_id=file_id,
+        admin_send_image_step="wait_caption"
+    )
+    await m.answer(
+        f"✅ Картинка получена!\n"
+        f"Теперь отправьте текст для подписи:"
+    )
+@router.message(lambda m: m.from_user.id in [7229194724] and m.text and not m.text.startswith("/"))
+async def admin_send_image_caption(m: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("admin_send_image_step") != "wait_caption":
+        return
+    user_id = data.get("admin_send_image_user_id")
+    file_id = data.get("admin_send_image_file_id")
+    caption = m.text
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Отправить", callback_data=f"confirm_send_image:{user_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send_image")
+        ]
+    ])
+    await m.answer_photo(
+        photo=file_id,
+        caption=f"📤 <b>Предпросмотр отправки:</b>\n\n"
+               f"👤 <b>Получатель:</b> {user_id}\n"
+               f"📝 <b>Текст:</b> {caption}\n\n"
+               f"Подтвердите отправку:",
+        reply_markup=kb
+    )
+    await state.update_data(
+        admin_send_image_caption=caption,
+        admin_send_image_step="confirm"
+    )
+@router.callback_query(F.data.startswith("confirm_send_image:"))
+async def confirm_send_image_to_user(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    user_id = int(cb.data.split(":")[1])
+    file_id = data.get("admin_send_image_file_id")
+    caption = data.get("admin_send_image_caption")
+    try:
+        await bot.send_photo(
+            chat_id=user_id,
+            photo=file_id,
+            caption=caption,
+            parse_mode="HTML"
+        )
+        await cb.message.edit_caption(
+            caption=f"✅ <b>Картинка отправлена!</b>\n\n"
+                   f"👤 Получатель: {user_id}\n"
+                   f"📝 Текст: {caption}"
+        )
+        logger.info(f"📤 Админ {cb.from_user.id} отправил картинку пользователю {user_id}")
+        await state.clear()
+    except TelegramForbiddenError:
+        await cb.message.edit_caption(
+            caption=f"❌ <b>Не удалось отправить</b>\n\n"
+                   f"Пользователь {user_id} заблокировал бота"
+        )
+    except Exception as e:
+        await cb.message.edit_caption(
+            caption=f"❌ <b>Ошибка при отправке:</b> {str(e)}"
+        )
+    await cb.answer()
+@router.message(Command("send_media"))
+async def send_media_to_user(m: Message):
+    admin_ids = [7229194724]  # Замените на реальные ID админов
+    if m.from_user.id not in admin_ids:
+        return
+    parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await m.answer("❌ Используйте: /send_media <user_id> <текст>")
+        return
+    try:
+        user_id = int(parts[1])
+        caption = parts[2]
+        await m.answer(
+            f"📤 Отправка пользователю {user_id}\n"
+            f"📝 Текст: {caption}\n\n"
+            f"Теперь отправьте картинку (фото)\n"
+            f"Или отправьте /cancel для отмены"
+        )
+        await r.setex(
+            f"admin_send_media:{m.from_user.id}",
+            300,  # 5 минут
+            json.dumps({"user_id": user_id, "caption": caption})
+        )
+    except ValueError:
+        await m.answer("❌ Неверный формат user_id")
+@router.message(F.photo, lambda m: m.from_user.id in [7229194724])
+async def handle_admin_media_photo(m: Message):
+    temp_key = f"admin_send_media:{m.from_user.id}"
+    temp_data_raw = await r.get(temp_key)
+    if not temp_data_raw:
+        return
+    temp_data = json.loads(temp_data_raw)
+    user_id = temp_data["user_id"]
+    caption = temp_data["caption"]
+    photo = m.photo[-1]
+    file_id = photo.file_id
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить", callback_data=f"send_media_now:{user_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_media")]
+    ])
+    await m.answer_photo(
+        photo=file_id,
+        caption=f"📤 <b>Предпросмотр отправки:</b>\n\n"
+               f"👤 <b>Получатель:</b> {user_id}\n"
+               f"📝 <b>Текст:</b> {caption}\n\n"
+               f"Подтвердите отправку:",
+        reply_markup=kb
+    )
+    await r.setex(
+        f"admin_send_media_file:{m.from_user.id}",
+        300,
+        json.dumps({"file_id": file_id, "user_id": user_id, "caption": caption})
+    )
+    await r.delete(temp_key)
+@router.callback_query(F.data.startswith("send_media_now:"))
+async def send_media_now(cb: CallbackQuery):
+    user_id = int(cb.data.split(":")[1])
+    temp_key = f"admin_send_media_file:{cb.from_user.id}"
+    temp_data_raw = await r.get(temp_key)
+    if not temp_data_raw:
+        await cb.answer("❌ Время действия истекло")
+        return
+    temp_data = json.loads(temp_data_raw)
+    file_id = temp_data["file_id"]
+    caption = temp_data["caption"]
+    try:
+        owner = await store.get_bot_owner(user_id)
+        token = await store.get_user_bot_token(owner)
+        trb = Bot(token=token)
+        await trb.send_photo(
+            chat_id=user_id,
+            photo=file_id,
+            caption=caption,
+            parse_mode="HTML"
+        )
+        await cb.message.edit_caption(
+            caption=f"✅ <b>Успешно отправлено!</b>\n\n"
+                   f"👤 Пользователь: {user_id}\n"
+                   f"📝 Текст: {caption}"
+        )
+        logger.info(f"📤 Админ {cb.from_user.id} отправил медиа пользователю {user_id}")
+    except TelegramForbiddenError:
+        await cb.message.edit_caption(
+            caption=f"❌ <b>Пользователь заблокировал бота</b>\n\n"
+                   f"ID: {user_id}"
+        )
+    except Exception as e:
+        await cb.message.edit_caption(
+            caption=f"❌ <b>Ошибка:</b> {str(e)}"
+        )
+    await r.delete(temp_key)
+    await cb.answer()
+@router.message(Command("quick_send"))
+async def quick_send_image(m: Message):
+    admin_ids = [123456789]
+    if m.from_user.id not in admin_ids:
+        return
+    parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await m.answer("❌ Формат: /quick_send <user_id> <текст>")
+        return
+    try:
+        user_id = int(parts[1])
+        caption = parts[2]
+        await r.setex(
+            f"quick_send:{m.from_user.id}",
+            300,
+            json.dumps({"user_id": user_id, "caption": caption})
+        )
+        await m.answer(
+            f"⚡ Быстрая отправка\n"
+            f"👤 Получатель: {user_id}\n"
+            f"📝 Текст: {caption}\n\n"
+            f"Теперь отправьте картинку для немедленной отправки"
+        )
+    except ValueError:
+        await m.answer("❌ Неверный user_id")
 @router.message(F.text.in_(["Открытые сделки", "Open Positions"]))
 async def on_open_positions(m: Message):
     try:
