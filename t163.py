@@ -476,6 +476,12 @@ class TradeHistory(BaseModel):
     closed_by: Literal["TP", "SL", "TIME"]
     closed_at: float
 class Store:
+    def __init__(self, r: redis.Redis = None):
+        if r is None:
+            # Используйте глобальный экземпляр
+            self.r = r  # Используйте глобальный r
+        else:
+            self.r = r
     async def get_bot_owner(self, user_id: int) -> Optional[int]:
         try:
             raw = await self.r.get(f"user:{user_id}:bot_owner")
@@ -549,8 +555,6 @@ class Store:
             return bool(ok)
         except Exception:
             return True
-    def __init__(self, r: redis.Redis):
-        self.r = r
     async def get_user(self, uid: int) -> User:
         raw = await self.r.get(RKeys.user(uid))
         if raw:
@@ -2040,7 +2044,19 @@ async def _init_trading_bot_username_once():
                     logger.info(f"📦 Using cached bot username: @{TRADING_BOT_USERNAME}")
             except Exception:
                 pass
-r: redis.Redis = redis.from_url(REDIS_URL, decode_responses=False)
+from redis.asyncio import ConnectionPool
+redis_pool = ConnectionPool.from_url(
+    REDIS_URL,
+    decode_responses=False,
+    max_connections=10,  # Ограничьте максимальное количество соединений
+    socket_keepalive=True,
+    socket_connect_timeout=5,
+    socket_timeout=5,
+    retry_on_timeout=True,
+)
+
+# Создайте глобальный клиент Redis
+r: redis.Redis = redis.Redis(connection_pool=redis_pool)
 store = Store(r)
 class S(StatesGroup):
     CHOOSING_LANGUAGE = State()  
