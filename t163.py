@@ -48,6 +48,9 @@ import logging, traceback
 import hashlib as _hl
 import sys, codecs, io
 import argparse
+import socket
+from redis.asyncio import Redis, ConnectionPool
+from redis.exceptions import ConnectionError, TimeoutError
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram import F, Router
@@ -126,6 +129,96 @@ NEXT_COUNTDOWN_AT: dict[tuple[int, int], float] = {}
 NEXT_SEND_AT_CHAT: dict[int, float] = {}
 WELCOME_IMAGE_URL = "https://i.ibb.co/7JWyRRdp/94af51c3330e.jpg"
 ASSETS_IMAGE_URL = WELCOME_IMAGE_URL
+
+async def check_redis_health():
+    """定期检查Redis连接状态"""
+    while True:
+        try:
+            start = time.time()
+            await r.ping()
+            ping_time = (time.time() - start) * 1000
+            if ping_time > 500:  # 超过500ms警告
+                logger.warning(f"Redis响应缓慢: {ping_time:.1f}ms")
+            await asyncio.sleep(60)  # 每分钟检查一次
+        except Exception as e:
+            logger.error(f"Redis健康检查失败: {e}")
+            # 尝试重新连接
+            try:
+                await r.close()
+                await r.initialize()
+            except Exception as reconnect_error:
+                logger.error(f"Redis重连失败: {reconnect_error}")
+            await asyncio.sleep(10)
+async def _close_leftover_open_positions_optimized():
+    """优化版的位置清理函数"""
+    start_time = time.time()
+    closed = 0
+    processed = 0
+    
+    try:
+        # 使用SCAN而不是KEYS来避免阻塞
+        cursor = '0'
+        position_keys = []
+        
+        while True:
+            try:
+                cursor, keys = await store.r.scan(
+                    cursor=cursor, 
+                    match="position:*", 
+                    count=100
+                )
+                position_keys.extend(keys)
+                if cursor == '0':
+                    break
+            except Exception as e:
+                logger.error(f"扫描位置键失败: {e}")
+                break
+        
+        logger.info(f"找到位置键: {len(position_keys)}")
+        
+        if not position_keys:
+            logger.info("没有需要处理的位置")
+            return
+        
+        # 分批处理，避免内存溢出
+        batch_size = 50
+        for i in range(0, len(position_keys), batch_size):
+            batch = position_keys[i:i+batch_size]
+            
+            # 获取批量数据
+            pipe = store.r.pipeline()
+            for key in batch:
+                pipe.get(key)
+            raw_positions = await pipe.execute()
+            
+            # 处理每个位置
+            tasks = []
+            for raw in raw_positions:
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                    p = Position(**data)
+                    if p.status == PosStatus.OPEN:
+                        tasks.append(_process_single_position(p))
+                except Exception as e:
+                    logger.warning(f"解析位置数据失败: {e}")
+            
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                closed += sum(1 for r in results if isinstance(r, bool) and r)
+            
+            processed += len(batch)
+            
+            # 避免过快处理
+            if i + batch_size < len(position_keys):
+                await asyncio.sleep(0.1)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"优化清理完成: 处理 {processed}，关闭 {closed}，耗时 {elapsed:.2f}秒")
+        
+    except Exception as e:
+        logger.error(f"优化清理失败: {e}")
 async def safe_send_text(
     chat_id: int,
     text: str,
@@ -260,21 +353,68 @@ async def errors_handler(event: Exception, *args, **kwargs):
         logger.error(f"Error in errors_handler: {e}")
     return True
 async def check_active_users_blocked_status():
+    """修复用户封禁状态检查"""
     while True:
         try:
-            active_users = await store.get_all_users()
-            for user in active_users:
+            # 使用增量检查，避免一次性加载所有用户
+            cursor = '0'
+            while True:
                 try:
-                    is_blocked = await check_bot_blocked_status(user.user_id)
-                    if is_blocked:
-                        logger.info(f"User {user.user_id} blocked the bot (periodic check)")
-                        await send_bot_blocked_event(user.user_id, "periodic_check")
-                        await store.remove_watcher(user.user_id)
+                    cursor, keys = await store.r.scan(
+                        cursor=cursor, 
+                        match="user:*", 
+                        count=50
+                    )
+                    for key in keys:
+                            # 解析用户ID
+                            if isinstance(key, bytes):
+                                key_str = key.decode('utf-8')
+                            else:
+                                key_str = str(key)
+                            
+                            parts = key_str.split(':')
+                            if len(parts) >= 2 and parts[0] == "user":
+                                try:
+                                    user_id = int(parts[1])
+                                    
+                                    # 检查是否是真正的用户键（不是子键）
+                                    if ':' not in key_str[5:]:  # "user:"之后没有冒号
+                                        # 更可靠的封禁检查
+                                        try:
+                                            await asyncio.wait_for(
+                                                bot.get_chat(user_id),
+                                                timeout=3.0
+                                            )
+                                        except asyncio.TimeoutError:
+                                            logger.warning(f"用户 {user_id} 检查超时，跳过")
+                                            continue
+                                        except Exception as e:
+                                            error_msg = str(e).lower()
+                                            blocked_phrases = [
+                                                "bot was blocked", 
+                                                "user is deactivated",
+                                                "chat not found",
+                                                "forbidden: bot was blocked",
+                                                "bot was kicked"
+                                            ]
+                                            if any(phrase in error_msg for phrase in blocked_phrases):
+                                                logger.info(f"用户 {user_id} 封禁了机器人")
+                                                await send_bot_blocked_event(user_id, "periodic_check")
+                                                await store.remove_watcher(user_id)
+                                except ValueError:
+                                    continue
                 except Exception as e:
-                    logger.error(f"Error checking user {user.user_id}: {e}")
+                    logger.error(f"检查用户封禁状态失败: {e}")
+                
+                if cursor == '0':
+                    break
+            
         except Exception as e:
-            logger.error(f"Error in periodic blocked status check: {e}")
-        await asyncio.sleep(1800)
+            logger.error(f"周期性封禁状态检查失败: {e}")
+        
+        # 增加检查间隔到1小时
+        await asyncio.sleep(3600)
+
 async def start_background_tasks():
     asyncio.create_task(check_active_users_blocked_status(), name="blocked_status_checker")
 def get_available_networks(token: str) -> list[str]:
@@ -2048,11 +2188,12 @@ from redis.asyncio import ConnectionPool
 redis_pool = ConnectionPool.from_url(
     REDIS_URL,
     decode_responses=False,
-    max_connections=10,  # Ограничьте максимальное количество соединений
+    max_connections=15,  # Увеличьте для Windows
     socket_keepalive=True,
-    socket_connect_timeout=5,
-    socket_timeout=5,
+    socket_connect_timeout=15,  # Увеличьте таймаут
+    socket_timeout=30,  # Увеличьте таймаут операций
     retry_on_timeout=True,
+    health_check_interval=30,
 )
 
 # Создайте глобальный клиент Redis
@@ -4754,17 +4895,24 @@ async def debug_balance(m: Message):
         f"🆔 Last activity: {user.last_activity}"
     )
 async def startup():
-    logger.info("🚀 Запуск бота...")
-    results = await check_redis_performance()
-    if results:
-        ping_time, _, _, _ = results
-        if ping_time > 200:
-            logger.warning(f"⚠️ ВЫСОКАЯ ЗАДЕРЖКА REDIS: {ping_time:.0f}ms! Это может замедлить работу бота.")
-        else:
-            logger.info(f"✅ Redis подключен, ping: {ping_time:.0f}ms")
+    logger.info("🚀 启动优化版机器人...")
+    
+    # 检查Redis连接
+    redis_ok = await check_redis_connection()
+    if not redis_ok:
+        logger.error("❌ Redis连接失败，机器人可能无法正常工作")
+    
+    # 启动健康检查
+    asyncio.create_task(check_redis_health(), name="redis_health_check")
+    
+    # 启动后台任务
     await start_background_tasks()
-    await _close_leftover_open_positions()
-    logger.info("✅ Бот запущен")
+    
+    # 使用优化版位置清理
+    logger.info("🔄 运行优化版位置清理...")
+    await _close_leftover_open_positions_optimized()
+    
+    logger.info("✅ 优化版机器人启动完成")
 async def save_user(self, user: User) -> None:
     try:
         await self.r.set(RKeys.user(user.user_id), user.model_dump_json())
